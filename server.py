@@ -860,7 +860,9 @@ def write_env(path: Path, data: dict[str, str]) -> None:
     grouped["other"] = []
 
     for k, v in data.items():
-        if not v:
+        # Preserve intentional model clearing across save/read/boot; absence uses
+        # the native dashboard model or its provider default instead.
+        if not v and k != "LLM_MODEL":
             continue
         cat = key_cat.get(k, "other")
         grouped.setdefault(cat, []).append(f"{k}={v}")

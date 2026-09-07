@@ -112,7 +112,7 @@ class NativeConfigTest(unittest.TestCase):
                 self.assertTrue(server.is_config_complete({}))
                 self.assertFalse(server.is_config_complete({"LLM_MODEL": ""}))
                 server.write_config_yaml({"LLM_MODEL": ""})
-                (self.home / ".env").write_text("LLM_MODEL=\n")
+                server.write_env(self.home / ".env", {"LLM_MODEL": ""})
                 self.assertFalse(server.is_config_complete())
 
     def test_boot_starts_native_codex_but_not_after_reset(self):

@@ -1,5 +1,6 @@
 """Offline regressions; run with the template's and Hermes' installed dependencies."""
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,64 @@ class NativeConfigTest(unittest.TestCase):
                 self.assertTrue(server.is_config_complete())
                 self.assertEqual(yaml.safe_load((self.home / "config.yaml").read_text())["model"]["default"], "")
                 server.write_config_yaml({}, reset_model=True)
+                self.assertFalse(server.is_config_complete())
+
+    def test_codex_cooldown_readiness_is_local_and_read_only(self):
+        from hermes_cli import auth
+
+        claims = base64.urlsafe_b64encode(json.dumps({
+            "exp": 4102444800, "sub": "fabricated-account",
+        }).encode()).decode().rstrip("=")
+        self.auth(pool=True)
+        auth_path = self.home / "auth.json"
+        data = json.loads(auth_path.read_text())
+        data["credential_pool"]["openai-codex"][0].update({
+            "access_token": f"eyJhbGciOiJub25lIn0.{claims}.fabricated",
+            "last_status": "exhausted", "last_error_code": 429,
+            "last_error_reset_at": 4102444800,
+        })
+        auth_path.write_text(json.dumps(data))
+        before = auth_path.read_bytes()
+        self.config({"provider": "openai-codex", "default": ""})
+        with patch.object(auth, "_probe_codex_quota_restored", wraps=auth._probe_codex_quota_restored) as probe, \
+                patch("httpx.Client.send", side_effect=AssertionError("Network forbidden")) as send:
+            ready = server.is_config_complete({})
+            send.assert_not_called()
+            probe.assert_not_called()
+        self.assertTrue(ready)
+        self.assertEqual(auth_path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), ["auth.json", "config.yaml"])
+
+    def test_codex_exported_cache_is_read_only_and_rejects_expired_tokens(self):
+        self.config({"provider": "openai-codex", "default": ""})
+        for directory in (".codex", "custom-codex"):
+            cache = self.home / directory
+            cache.mkdir()
+            for expiry, expected in ((4102444800, True), (1, False)):
+                with self.subTest(directory=directory, expiry=expiry):
+                    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+                    auth_path = cache / "auth.json"
+                    auth_path.write_text(json.dumps({"tokens": {
+                        "access_token": f"eyJhbGciOiJub25lIn0.{claims}.fabricated",
+                        "refresh_token": "fabricated-refresh",
+                    }}))
+                    before = auth_path.read_bytes()
+                    with patch.dict(os.environ, {"CODEX_HOME": "" if directory == ".codex" else str(cache)}), \
+                            patch("httpx.Client.send", side_effect=AssertionError("Network forbidden")) as send:
+                        self.assertEqual(server.is_config_complete({}), expected)
+                        send.assert_not_called()
+                    self.assertEqual(auth_path.read_bytes(), before)
+                    self.assertFalse((self.home / "auth.json").exists())
+
+    def test_explicit_empty_model_blocks_native_readiness(self):
+        self.auth()
+        for default in ("", "native-model"):
+            with self.subTest(default=default):
+                self.config({"provider": "openai-codex", "default": default})
+                self.assertTrue(server.is_config_complete({}))
+                self.assertFalse(server.is_config_complete({"LLM_MODEL": ""}))
+                server.write_config_yaml({"LLM_MODEL": ""})
+                (self.home / ".env").write_text("LLM_MODEL=\n")
                 self.assertFalse(server.is_config_complete())
 
     def test_boot_starts_native_codex_but_not_after_reset(self):

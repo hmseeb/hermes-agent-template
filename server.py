@@ -1125,6 +1125,35 @@ async def api_oauth_xai_status(request: Request) -> Response:
     })
 
 
+def _has_codex_oauth_tokens() -> bool:
+    """Read local credentials only; runtime resolution can probe quota and write auth."""
+    try:
+        data = json.loads((Path(HERMES_HOME) / "auth.json").read_text())
+        providers = data.get("providers", {})
+        state = providers.get("openai-codex", {}) if isinstance(providers, dict) else {}
+        tokens = state.get("tokens", {}) if isinstance(state, dict) else {}
+        if isinstance(tokens, dict) and all(
+            isinstance(tokens.get(key), str) and tokens[key].strip()
+            for key in ("access_token", "refresh_token")
+        ):
+            return True
+        pool = data.get("credential_pool", {})
+        entries = pool.get("openai-codex", []) if isinstance(pool, dict) else []
+        if isinstance(entries, list) and any(
+            isinstance(entry, dict) and isinstance(entry.get("access_token"), str)
+            and entry["access_token"].strip() for entry in entries
+        ):
+            return True
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        # This native helper only reads the Codex CLI cache and checks expiry.
+        from hermes_cli.auth import _import_codex_cli_tokens
+        return bool(_import_codex_cli_tokens())
+    except Exception:
+        return False
+
+
 def is_config_complete(data: dict[str, str] | None = None) -> bool:
     """Single source of truth for 'ready to run the gateway'.
 
@@ -1144,14 +1173,11 @@ def is_config_complete(data: dict[str, str] | None = None) -> bool:
     has_model = bool(data.get("LLM_MODEL", model.get("default", "")))
     if model.get("provider") == "openai-codex":
         try:
-            from hermes_cli.auth import resolve_codex_runtime_credentials
             from hermes_cli.models import get_default_model_for_provider
 
-            # A local presence check, not a login/refresh or paid inference call.
-            # Hermes handles expiry and its provider-default model at runtime.
-            credentials = resolve_codex_runtime_credentials(refresh_if_expiring=False)
-            return bool(credentials.get("api_key") and (
-                has_model or get_default_model_for_provider("openai-codex")
+            # Hermes handles token expiry and quota cooldowns at runtime.
+            return bool(_has_codex_oauth_tokens() and (
+                has_model or ("LLM_MODEL" not in data and get_default_model_for_provider("openai-codex"))
             ))
         except Exception:
             # Missing/invalid auth or an older Hermes without this API.

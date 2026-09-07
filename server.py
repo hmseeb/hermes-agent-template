@@ -451,7 +451,6 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
     """
     import yaml  # hermes-agent already pulls pyyaml; deferred import keeps cold start light
 
-    model = data.get("LLM_MODEL", "")
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -468,7 +467,7 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
 
     merged = dict(existing)
 
-    # Deployment-managed (always authoritative — these reflect the runtime env).
+    # Merge deployment settings without erasing native dashboard model choices.
     if reset_model:
         # Config reset: wipe the model block to a clean slate. Preserving the old
         # provider/base_url here would leave stale routing behind (e.g. a lingering
@@ -478,7 +477,10 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
         merged_model = {"default": ""}
     else:
         merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
-        merged_model["default"] = model
+        # The native dashboard configures models without writing LLM_MODEL.
+        # Absence preserves its choice; an explicit empty value still clears it.
+        if "LLM_MODEL" in data:
+            merged_model["default"] = data["LLM_MODEL"]
         current_provider = str(merged_model.get("provider") or "").strip()
         # Only default to "auto" on a config that has never had a provider
         # pinned. Once a provider is set explicitly — either by
@@ -1130,7 +1132,30 @@ def is_config_complete(data: dict[str, str] | None = None) -> bool:
     """
     if data is None:
         data = read_env(ENV_FILE)
-    has_model = bool(data.get("LLM_MODEL"))
+    import yaml
+
+    try:
+        config = yaml.safe_load((Path(HERMES_HOME) / "config.yaml").read_text())
+        model = config.get("model", {}) if isinstance(config, dict) else {}
+    except (OSError, yaml.YAMLError):
+        model = {}
+    if not isinstance(model, dict):
+        model = {}
+    has_model = bool(data.get("LLM_MODEL", model.get("default", "")))
+    if model.get("provider") == "openai-codex":
+        try:
+            from hermes_cli.auth import resolve_codex_runtime_credentials
+            from hermes_cli.models import get_default_model_for_provider
+
+            # A local presence check, not a login/refresh or paid inference call.
+            # Hermes handles expiry and its provider-default model at runtime.
+            credentials = resolve_codex_runtime_credentials(refresh_if_expiring=False)
+            return bool(credentials.get("api_key") and (
+                has_model or get_default_model_for_provider("openai-codex")
+            ))
+        except Exception:
+            # Missing/invalid auth or an older Hermes without this API.
+            return False
     has_provider = any(data.get(k) for k in PROVIDER_KEYS) or _has_xai_oauth_tokens()
     return has_model and has_provider
 
